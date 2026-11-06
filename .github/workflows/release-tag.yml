@@ -1,0 +1,117 @@
+name: Create Semantic Version Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the semantic version should be incremented?
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Bump version and create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main and fetch complete history
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Calculate next version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          CURRENT="$(jq -r '.application.version' config.json)"
+          if [[ ! "$CURRENT" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "config.json contains an invalid SemVer: $CURRENT" >&2
+            exit 1
+          fi
+
+          IFS=. read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          case "$BUMP" in
+            major) ((MAJOR+=1)); MINOR=0; PATCH=0 ;;
+            minor) ((MINOR+=1)); PATCH=0 ;;
+            patch) ((PATCH+=1)) ;;
+            *) echo "Unsupported bump: $BUMP" >&2; exit 1 ;;
+          esac
+
+          NEXT="${MAJOR}.${MINOR}.${PATCH}"
+          TAG="v${NEXT}"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "Tag already exists: $TAG" >&2
+            exit 1
+          fi
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Update config.json
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          tmp="$(mktemp)"
+          jq --arg version "$VERSION" '.application.version = $version' config.json > "$tmp"
+          mv "$tmp" config.json
+
+      - name: Commit version update
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add config.json
+          git commit -m "chore(release): v${VERSION}"
+
+      - name: Create annotated tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: git tag -a "$TAG" -m "Release v${VERSION}"
+
+      - name: Push commit and tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git push origin HEAD:main
+          git push origin "$TAG"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: gh release create "$TAG" --generate-notes --title "$TAG"
+
+      # A push made with GITHUB_TOKEN does not start another workflow.
+      # Publish the versioned image here so every manual release is complete.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and publish release image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/nginx-container-demo:${{ steps.version.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
