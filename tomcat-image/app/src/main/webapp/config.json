@@ -1,0 +1,12 @@
+{
+  "application": {
+    "name": "Tomcat Java Demo",
+    "version": "1.0.0",
+    "environment": "dev"
+  },
+  "docker": {
+    "image": "tomcat-demo",
+    "registry": "docker.io",
+    "port": 8080
+  }
+}
