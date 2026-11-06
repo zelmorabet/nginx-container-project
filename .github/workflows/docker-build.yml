@@ -1,79 +1,161 @@
-name: Docker Build and Publish
+name: Build and publish Docker images
 
 on:
   pull_request:
+    paths:
+      - "nginx-image/**"
+      - "tomcat-image/**"
+      - ".github/workflows/docker-build.yml"
   push:
     branches: [main]
-    tags: ['v*']
+    tags:
+      - "nginx-v*"
+      - "tomcat-v*"
+    paths:
+      - "nginx-image/**"
+      - "tomcat-image/**"
+      - ".github/workflows/docker-build.yml"
   workflow_dispatch:
+    inputs:
+      image:
+        description: Image to build (manual runs publish only when run on main)
+        required: true
+        type: choice
+        options: [both, nginx, tomcat]
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
-  build-test:
-    name: Build and test image
+  changes:
+    name: Detect changed applications
     runs-on: ubuntu-latest
+    outputs:
+      nginx: ${{ steps.filter.outputs.nginx }}
+      tomcat: ${{ steps.filter.outputs.tomcat }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Initialize change flags
+        id: defaults
+        run: |
+          echo "nginx=false" >> "$GITHUB_OUTPUT"
+          echo "tomcat=false" >> "$GITHUB_OUTPUT"
+      - name: Detect changed paths
+        id: filter
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            nginx:
+              - 'nginx-image/**'
+            tomcat:
+              - 'tomcat-image/**'
+
+  build:
+    name: Build, test and publish ${{ matrix.image }}
+    needs: changes
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: nginx
+            directory: nginx-image
+            dockerhub_repo: nginx-demo
+            port: "80"
+          - image: tomcat
+            directory: tomcat-image
+            dockerhub_repo: tomcat-demo
+            port: "8080"
+    steps:
+      - name: Decide whether this image should run
+        id: decision
+        shell: bash
+        env:
+          IMAGE: ${{ matrix.image }}
+          NGINX_CHANGED: ${{ needs.changes.outputs.nginx }}
+          TOMCAT_CHANGED: ${{ needs.changes.outputs.tomcat }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          MANUAL_IMAGE: ${{ inputs.image }}
+        run: |
+          set -euo pipefail
+          RUN=false
+          PUBLISH=false
+          IMAGE_TAG=latest
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            [[ "$IMAGE" == "nginx" && "$NGINX_CHANGED" == "true" ]] && RUN=true
+            [[ "$IMAGE" == "tomcat" && "$TOMCAT_CHANGED" == "true" ]] && RUN=true
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$MANUAL_IMAGE" == "both" || "$MANUAL_IMAGE" == "$IMAGE" ]]; then RUN=true; fi
+            if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then PUBLISH=true; fi
+          elif [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            [[ "$IMAGE" == "nginx" && "$NGINX_CHANGED" == "true" ]] && RUN=true
+            [[ "$IMAGE" == "tomcat" && "$TOMCAT_CHANGED" == "true" ]] && RUN=true
+            [[ "$RUN" == "true" ]] && PUBLISH=true
+          elif [[ "$GITHUB_REF" == refs/tags/nginx-v* && "$IMAGE" == "nginx" ]]; then
+            RUN=true; PUBLISH=true; IMAGE_TAG="${REF_NAME#nginx-}"
+          elif [[ "$GITHUB_REF" == refs/tags/tomcat-v* && "$IMAGE" == "tomcat" ]]; then
+            RUN=true; PUBLISH=true; IMAGE_TAG="${REF_NAME#tomcat-}"
+          fi
+
+          echo "run=$RUN" >> "$GITHUB_OUTPUT"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
+        if: steps.decision.outputs.run == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
+        if: steps.decision.outputs.run == 'true'
         uses: docker/setup-buildx-action@v3
 
-      - name: Build image
+      - name: Build image for validation
+        if: steps.decision.outputs.run == 'true'
         uses: docker/build-push-action@v6
         with:
-          context: .
-          push: false
+          context: ./${{ matrix.directory }}
           load: true
-          tags: nginx-container-demo:test
+          push: false
+          tags: local/${{ matrix.image }}-demo:test
 
-      - name: Run container
+      - name: Run container and smoke test
+        if: steps.decision.outputs.run == 'true'
+        env:
+          IMAGE: local/${{ matrix.image }}-demo:test
+          PORT: ${{ matrix.port }}
+          APP: ${{ matrix.image }}
         run: |
-          docker run -d --name nginx-test -p 8080:80 nginx-container-demo:test
-          for attempt in {1..15}; do
-            if curl --fail http://localhost:8080/; then break; fi
+          set -euo pipefail
+          docker run -d --rm --name "${APP}-smoke" -p "127.0.0.1:${PORT}:${PORT}" "$IMAGE"
+          cleanup() { docker rm -f "${APP}-smoke" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          for attempt in {1..30}; do
+            if curl --silent --fail "http://127.0.0.1:${PORT}/" >/dev/null; then break; fi
             sleep 2
           done
-          curl --fail http://localhost:8080/config.json
-          docker rm -f nginx-test
-
-  publish:
-    name: Publish to Docker Hub
-    needs: build-test
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+          curl --fail "http://127.0.0.1:${PORT}/"
+          curl --fail "http://127.0.0.1:${PORT}/config.json"
+          if [[ "$APP" == "tomcat" ]]; then curl --fail "http://127.0.0.1:${PORT}/api/info"; fi
 
       - name: Log in to Docker Hub
+        if: steps.decision.outputs.publish == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Generate image metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/nginx-container-demo
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=tag
-
-      - name: Build and push
+      - name: Publish image
+        if: steps.decision.outputs.publish == 'true'
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ./${{ matrix.directory }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.dockerhub_repo }}:${{ steps.decision.outputs.image_tag }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}

@@ -1,47 +1,51 @@
-name: Create Semantic Version Release
+name: Create image release
 
 on:
   workflow_dispatch:
     inputs:
-      bump:
-        description: Which part of the semantic version should be incremented?
+      image:
+        description: Which image should be released?
         required: true
         type: choice
-        options:
-          - patch
-          - minor
-          - major
+        options: [nginx, tomcat]
+      bump:
+        description: Semantic version increment
+        required: true
+        type: choice
+        options: [patch, minor, major]
 
 permissions:
   contents: write
 
+# Both image releases update main, so serialize them.
 concurrency:
-  group: release-main
+  group: image-release-main
   cancel-in-progress: false
 
 jobs:
   release:
-    name: Bump version and create GitHub Release
+    name: Release ${{ inputs.image }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout main and fetch complete history
-        uses: actions/checkout@v7
+      - name: Checkout main and fetch all tags
+        uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
 
       - name: Calculate next version
         id: version
+        shell: bash
         env:
+          IMAGE: ${{ inputs.image }}
           BUMP: ${{ inputs.bump }}
         run: |
           set -euo pipefail
-          CURRENT="$(jq -r '.application.version' config.json)"
+          CONFIG="${IMAGE}-image/config.json"
+          CURRENT="$(jq -r '.application.version' "$CONFIG")"
           if [[ ! "$CURRENT" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "config.json contains an invalid SemVer: $CURRENT" >&2
-            exit 1
+            echo "Invalid SemVer in $CONFIG: $CURRENT" >&2; exit 1
           fi
-
           IFS=. read -r MAJOR MINOR PATCH <<< "$CURRENT"
           case "$BUMP" in
             major) ((MAJOR+=1)); MINOR=0; PATCH=0 ;;
@@ -49,55 +53,49 @@ jobs:
             patch) ((PATCH+=1)) ;;
             *) echo "Unsupported bump: $BUMP" >&2; exit 1 ;;
           esac
-
-          NEXT="${MAJOR}.${MINOR}.${PATCH}"
-          TAG="v${NEXT}"
-          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            echo "Tag already exists: $TAG" >&2
-            exit 1
+          VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          TAG="${IMAGE}-v${VERSION}"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag already exists: ${TAG}; refusing to overwrite it." >&2; exit 1
           fi
-          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
-          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "config=$CONFIG" >> "$GITHUB_OUTPUT"
 
-      - name: Update config.json
+      - name: Update image configuration files
         env:
+          CONFIG: ${{ steps.version.outputs.config }}
           VERSION: ${{ steps.version.outputs.version }}
+          IMAGE: ${{ inputs.image }}
         run: |
-          tmp="$(mktemp)"
-          jq --arg version "$VERSION" '.application.version = $version' config.json > "$tmp"
-          mv "$tmp" config.json
+          set -euo pipefail
+          if [[ "$IMAGE" == "nginx" ]]; then APP_CONFIG="nginx-image/app/config.json"; else APP_CONFIG="tomcat-image/app/src/main/webapp/config.json"; fi
+          for FILE in "$CONFIG" "$APP_CONFIG"; do
+            tmp="$(mktemp)"
+            jq --arg version "$VERSION" '.application.version = $version' "$FILE" > "$tmp"
+            mv "$tmp" "$FILE"
+          done
 
-      - name: Commit version update
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add config.json
-          git commit -m "chore(release): v${VERSION}"
-
-      - name: Create annotated tag
+      - name: Commit version update and create annotated tag
         env:
           TAG: ${{ steps.version.outputs.tag }}
-          VERSION: ${{ steps.version.outputs.version }}
-        run: git tag -a "$TAG" -m "Release v${VERSION}"
+          IMAGE: ${{ inputs.image }}
+        run: |
+          set -euo pipefail
+          if [[ "$IMAGE" == "nginx" ]]; then APP_CONFIG="nginx-image/app/config.json"; else APP_CONFIG="tomcat-image/app/src/main/webapp/config.json"; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${IMAGE}-image/config.json" "$APP_CONFIG"
+          git commit -m "chore(${IMAGE}): release ${TAG}"
+          git tag -a "$TAG" -m "Release ${TAG}"
 
-      - name: Push commit and tag
+      - name: Push release commit and tag
         env:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           git push origin HEAD:main
           git push origin "$TAG"
 
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
-        run: gh release create "$TAG" --generate-notes --title "$TAG"
-
-      # A push made with GITHUB_TOKEN does not start another workflow.
-      # Publish the versioned image here so every manual release is complete.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -107,11 +105,18 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and publish release image
+      # GITHUB_TOKEN tag pushes do not trigger a separate workflow run.
+      - name: Publish released image
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ./${{ inputs.image }}-image
           push: true
-          tags: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/nginx-container-demo:${{ steps.version.outputs.tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.image == 'nginx' && 'nginx-demo' || 'tomcat-demo' }}:v${{ steps.version.outputs.version }}
+          cache-from: type=gha,scope=${{ inputs.image }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.image }}
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: gh release create "$TAG" --generate-notes --title "$TAG"
