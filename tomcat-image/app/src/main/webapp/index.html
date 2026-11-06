@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Tomcat Java Demo</title><link rel="stylesheet" href="/css/style.css"></head>
+<body><main class="card"><p class="eyebrow">JAVA · SERVLET · TOMCAT</p><h1 id="app-name">Tomcat Java Demo</h1>
+<p class="lead">A Java Servlet application deployed as a WAR in Apache Tomcat.</p>
+<dl><div><dt>Application version</dt><dd id="version">Loading…</dd></div><div><dt>Environment</dt><dd id="environment">Loading…</dd></div><div><dt>Java API</dt><dd>Jakarta Servlet 6.0</dd></div><div><dt>HTTP port</dt><dd>8080</dd></div></dl>
+<section class="api"><h2>Java backend health</h2><pre id="api-status">Calling /api/info…</pre></section><p id="status" class="status">Loading application configuration…</p></main>
+<script>
+Promise.all([
+fetch('/config.json',{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error(`config.json: HTTP ${r.status}`);return r.json()}),
+fetch('/api/info',{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error(`/api/info: HTTP ${r.status}`);return r.json()})
+]).then(([c,a])=>{
+document.getElementById('app-name').textContent=c.application.name;document.title=c.application.name;
+document.getElementById('version').textContent=c.application.version;document.getElementById('environment').textContent=c.application.environment;
+document.getElementById('api-status').textContent=JSON.stringify(a,null,2);
+document.getElementById('status').textContent='Configuration and Java API loaded successfully.';
+}).catch(e=>document.getElementById('status').textContent=`Application error: ${e.message}`);
+</script></body></html>

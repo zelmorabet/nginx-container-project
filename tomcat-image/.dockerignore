@@ -1,0 +1,7 @@
+.git
+.github
+scripts
+README.md
+CHANGELOG.md
+app/target
+*.zip
