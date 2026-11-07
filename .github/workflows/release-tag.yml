@@ -69,7 +69,7 @@ jobs:
           IMAGE: ${{ inputs.image }}
         run: |
           set -euo pipefail
-          if [[ "$IMAGE" == "nginx" ]]; then APP_CONFIG="nginx-image/config.json"; else APP_CONFIG="tomcat-image/src/main/webapp/config.json"; fi
+          if [[ "$IMAGE" == "nginx" ]]; then APP_CONFIG="nginx-image/config.json"; else APP_CONFIG="tomcat-image/config.json"; fi
           for FILE in "$CONFIG" "$APP_CONFIG"; do
             tmp="$(mktemp)"
             jq --arg version "$VERSION" '.application.version = $version' "$FILE" > "$tmp"
