@@ -1,0 +1,12 @@
+{
+  "application": {
+    "name": "Nginx Container Demo",
+    "version": "1.3.0",
+    "environment": "dev"
+  },
+  "docker": {
+    "image": "nginx-container-demo",
+    "registry": "docker.io",
+    "port": 80
+  }
+}
