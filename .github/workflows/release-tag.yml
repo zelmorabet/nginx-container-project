@@ -33,6 +33,39 @@ jobs:
           ref: main
           fetch-depth: 0
 
+      - name: check and install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MISSING_PACKAGES=()
+
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "jq is missing"
+            MISSING_PACKAGES+=(jq)
+          else
+            echo "jq already installed: $(jq --version)"
+          fi
+
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "GitHub CLI is missing"
+            MISSING_PACKAGES+=(gh)
+          else
+            echo "GitHub CLI already installed: $(gh --version)"
+          fi
+
+          if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
+            echo "Installing missing dependencies: ${MISSING_PACKAGES[*]}"
+            sudo apt-get update
+            sudo apt-get install -y "${MISSING_PACKAGES[@]}"
+          else
+            echo "All dependencies are already installed."
+          fi
+
+          echo "Dependency verification:"
+          jq --version
+          gh --version
+
       - name: Calculate next version
         id: version
         shell: bash
