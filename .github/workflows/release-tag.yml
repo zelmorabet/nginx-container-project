@@ -158,7 +158,7 @@ jobs:
     name: Deploy Nginx to local k3s
     needs: release
     if: inputs.image == 'nginx'
-    runs-on: [self-hosted, linux, k3s]
+    runs-on: self-hosted
     steps:
       - name: Checkout deployment manifests
         uses: actions/checkout@v4
