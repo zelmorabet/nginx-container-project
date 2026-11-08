@@ -30,7 +30,7 @@ permissions:
 jobs:
   changes:
     name: Detect changed applications
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     outputs:
       nginx: ${{ steps.filter.outputs.nginx }}
       tomcat: ${{ steps.filter.outputs.tomcat }}
@@ -57,7 +57,7 @@ jobs:
   build:
     name: Build, test and publish ${{ matrix.image }}
     needs: changes
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     strategy:
       fail-fast: false
       matrix:
@@ -109,11 +109,11 @@ jobs:
 
       - name: Checkout
         if: steps.decision.outputs.run == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
         if: steps.decision.outputs.run == 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build image for validation
         if: steps.decision.outputs.run == 'true'
